@@ -9,6 +9,7 @@ from pypdf import PdfReader
 import dash
 from dash import Dash, dcc, html, dash_table, Input, Output, State, callback
 from flask import Flask
+from flask_restful import reqparse, Resource, Api
 
 label_mapping = {'Other': 'Other', 
 'Information/Explanation': 'Non-Fiction', 
@@ -53,8 +54,9 @@ def get_model_object():
     return model
 
 def get_model_output(model_obj, model_input):
-    predictions, logit_output = model_obj.predict([model_input])
-    return label_mapping[model_obj.config.id2label[predictions[0]]]
+    prediction, logit_output = model_obj.predict([model_input])
+    prediction_enr = label_mapping[model_obj.config.id2label[prediction[0]]]
+    return prediction, logit_output, prediction_enr
 
 def parse_contents(contents, filename, date):
     content_type, content_string = contents.split(',')
@@ -63,7 +65,7 @@ def parse_contents(contents, filename, date):
         if '.pdf' in filename:
             file_text = extract_text(io.BytesIO(decoded))
             model_obj = get_model_object()
-            model_pred = get_model_output(model_obj=model_obj, model_input=file_text)
+            model_pred_raw, model_logit, model_pred = get_model_output(model_obj=model_obj, model_input=file_text)
             tbl = dash_table.DataTable(
                     id='table',
                     columns=[{"name": i, "id": i} for i in ["filename", "date", "prediction"]],
@@ -85,6 +87,27 @@ def parse_contents(contents, filename, date):
 # Dash
 server = Flask('app')
 app = dash.Dash(__name__, server=server, title="Book Genre Classification")
+
+# API
+api = Api(server)
+parser = reqparse.RequestParser()
+parser.add_argument('filepath')
+
+class BookClassifier(Resource):
+    def post(self):
+        args = parser.parse_args()
+        file_text = extract_text(content=args['filepath'])
+        if file_text is None:
+            return {'Error': 'File cannot be reached or has no parsable content. Please try again with another '
+                             'file'}, 400
+        else:
+            model_obj = get_model_object()
+            model_pred_raw, model_logit, model_pred = get_model_output(model_obj=model_obj, model_input=file_text)
+            return {'predicted_class_raw': model_obj.config.id2label[model_pred_raw[0]], 
+            'logit_score': {model_obj.config.id2label[i]: model_logit[0][i] for i in range(len(model_logit[0]))}, 
+            'predicted_class_final': model_pred}, 201
+
+api.add_resource(BookClassifier, '/predict')
 
 # HTML/CSS
 ## Note that much of this CSS comes from https://codepen.io/chriddyp/pen/bWLwgP.css
