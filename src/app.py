@@ -10,6 +10,9 @@ import dash
 from dash import Dash, dcc, html, dash_table, Input, Output, State, callback
 from flask import Flask
 from flask_restful import reqparse, Resource, Api
+from envparse import env
+from sqlalchemy import create_engine, insert, select, MetaData, Table
+import pandas as pd
 
 label_mapping = {'Other': 'Other', 
 'Information/Explanation': 'Non-Fiction', 
@@ -20,6 +23,13 @@ label_mapping = {'Other': 'Other',
 'Prose/Lyrical': 'Fiction', 
 'Legal': 'Non-Fiction', 
 'Promotion': 'Fiction'}
+
+env.read_envfile()
+
+# Connect to database for storing article metadata
+uri = env.str('DATABASE_URL')
+if uri.startswith("postgres://"):
+    uri = uri.replace("postgres://", "postgresql://", 1)
 
 
 def extract_text(content):
@@ -58,6 +68,32 @@ def get_model_output(model_obj, model_input):
     prediction_enr = label_mapping[model_obj.config.id2label[prediction[0]]]
     return prediction, logit_output, prediction_enr
 
+def save_metadata(uri, filename, prediction):
+    engine = create_engine(uri, echo=True)
+    metadata = MetaData()
+    book_data = Table('book_data', metadata, autoload_with=engine)
+    stmt = insert(book_data).values(filename=filename, prediction=prediction)
+    compiled = stmt.compile()
+    with engine.connect() as conn:
+        result = conn.execute(stmt)
+        conn.commit()
+    engine.dispose()
+
+def query_metadata(uri):
+    engine = create_engine(uri, echo=True)
+    metadata = MetaData()
+    book_data = Table('book_data', metadata, autoload_with=engine)
+    stmt = select(book_data).order_by(book_data.c.id.desc())
+    compiled = stmt.compile()
+    with engine.connect() as conn:
+        results = conn.execute(stmt)
+        df = pd.DataFrame(results.fetchall())
+        df.columns = results.keys()
+    engine.dispose()
+    
+    return df
+    
+
 def parse_contents(contents, filename, date):
     content_type, content_string = contents.split(',')
     decoded = base64.b64decode(content_string)
@@ -66,12 +102,12 @@ def parse_contents(contents, filename, date):
             file_text = extract_text(io.BytesIO(decoded))
             model_obj = get_model_object()
             model_pred_raw, model_logit, model_pred = get_model_output(model_obj=model_obj, model_input=file_text)
+            save_metadata(uri=uri, filename=filename, prediction=model_pred)
+            df_metadata = query_metadata(uri=uri)
             tbl = dash_table.DataTable(
                     id='table',
-                    columns=[{"name": i, "id": i} for i in ["filename", "date", "prediction"]],
-                    data=[{"filename": filename, 
-                    "date": datetime.datetime.fromtimestamp(date), 
-                    "prediction": model_pred}],
+                    columns=[{"name": i, "id": i} for i in df_metadata.columns],
+                    data=df_metadata.to_dict('records'),
                     style_cell=dict(textAlign='left'),
                     style_header=dict(backgroundColor='paleturquoise'),
                     style_data=dict(backgroundColor='lavender')
